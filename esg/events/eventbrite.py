@@ -1,6 +1,5 @@
 import requests
 import json
-from utils.db_utils import save_events_to_csv
 
 def eventbrite_events():
     url = "https://www.eventbrite.com/api/v3/destination/search/"
@@ -87,3 +86,10 @@ def eventbrite_events():
 
     return parsed_events
 
+
+def main():
+    events = eventbrite_events()
+    print(f"Eventbrite events scraped without database writes: {len(events)}")
+
+if __name__ == "__main__":
+    main()

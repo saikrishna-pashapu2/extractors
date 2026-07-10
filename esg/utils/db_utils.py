@@ -1,21 +1,76 @@
-import psycopg2
-from contextlib import closing
-import logging
-from datetime import datetime
 import csv
+import json
+import logging
+import os
+from contextlib import closing
+from datetime import datetime
+from pathlib import Path
 
-DB_NAME = "postgres"
-DB_USER = "postgres"     
-DB_PASS = "finvizier2023"
-DB_HOST = "esgarticles.cf4iaa2amdt3.me-central-1.rds.amazonaws.com"
-DB_PORT = "5432"
+import psycopg2
+from psycopg2.extras import Json
+from dotenv import load_dotenv
+
+
+load_dotenv(Path(__file__).resolve().parents[1] / ".env")
+
+DB_NAME = os.getenv("DB_NAME")
+DB_USER = os.getenv("DB_USER")
+DB_PASS = os.getenv("DB_PASSWORD") or os.getenv("DB_PASS")
+DB_HOST = os.getenv("DB_HOST")
+DB_PORT = os.getenv("DB_PORT", "5432")
 
 logging.basicConfig(level=logging.DEBUG)
 
+ADDITIONAL_EVENT_SOURCES = frozenset(
+    {
+        "Global Reporting Initiative (GRI)",
+        "Sustainable Fitch",
+        "S&P Global",
+        "Central Bank of the UAE (CBUAE)",
+        "Climate Bonds Initiative",
+        "OECD",
+        "World Economic Forum",
+    }
+)
+
+
+def _connect():
+    config = {
+        "dbname": DB_NAME,
+        "user": DB_USER,
+        "password": DB_PASS,
+        "host": DB_HOST,
+        "port": DB_PORT,
+    }
+    missing = [key for key, value in config.items() if not value]
+    if missing:
+        env_names = {
+            "dbname": "DB_NAME",
+            "user": "DB_USER",
+            "password": "DB_PASSWORD",
+            "host": "DB_HOST",
+            "port": "DB_PORT",
+        }
+        missing_names = ", ".join(env_names[key] for key in missing)
+        raise RuntimeError(f"Missing required database environment variables: {missing_names}")
+    return psycopg2.connect(**config)
+
+
+def _json_dumps(value):
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        default=lambda item: item.isoformat() if hasattr(item, "isoformat") else str(item),
+    )
+
+
+def _json_text(value):
+    if value in (None, ""):
+        return None
+    return _json_dumps(value) if isinstance(value, (list, dict, tuple)) else str(value)
+
 def article_exists(url):
-    with closing(psycopg2.connect(
-        dbname=DB_NAME, user=DB_USER, password=DB_PASS, host=DB_HOST, port=DB_PORT
-    )) as conn:
+    with closing(_connect()) as conn:
         with closing(conn.cursor()) as cursor:
             cursor.execute('''SELECT COUNT(*) FROM esg_articles WHERE link = %s''', (url,))
             return cursor.fetchone()[0] > 0
@@ -25,9 +80,7 @@ def save_article(article):
         logging.debug(f"Duplicate article found, not saving: {article['title']}")
         return
     
-    with closing(psycopg2.connect(
-        dbname=DB_NAME, user=DB_USER, password=DB_PASS, host=DB_HOST, port=DB_PORT
-    )) as conn:
+    with closing(_connect()) as conn:
         with closing(conn.cursor()) as cursor:
             cursor.execute('''INSERT INTO esg_articles (title, published, summary, link, source, matched_keywords) 
                               VALUES (%s, %s, %s, %s, %s, %s)''', 
@@ -38,9 +91,7 @@ def save_article(article):
 
 def fetch_articles_by_date(selected_date):
     try:
-        with closing(psycopg2.connect(
-            dbname=DB_NAME, user=DB_USER, password=DB_PASS, host=DB_HOST, port=DB_PORT
-        )) as conn:
+        with closing(_connect()) as conn:
             with closing(conn.cursor()) as cursor:
                 cursor.execute("""
                     SELECT title, published, summary, link, source, matched_keywords 
@@ -55,9 +106,7 @@ def fetch_articles_by_date(selected_date):
         return []
     
 def pub_exists(url):
-    with closing(psycopg2.connect(
-        dbname=DB_NAME, user=DB_USER, password=DB_PASS, host=DB_HOST, port=DB_PORT
-    )) as conn:
+    with closing(_connect()) as conn:
         with closing(conn.cursor()) as cursor:
             cursor.execute("SELECT 1 FROM publications WHERE link = %s LIMIT 1", (url,))
             result = cursor.fetchone()
@@ -69,11 +118,9 @@ def save_pub(article):
         logging.debug(f"Duplicate article found, not saving: {article['title']}")
         return
     current_date_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    with closing(psycopg2.connect(
-        dbname=DB_NAME, user=DB_USER, password=DB_PASS, host=DB_HOST, port=DB_PORT
-    )) as conn:
+    with closing(_connect()) as conn:
         with closing(conn.cursor()) as cursor:
-            cursor.execute('''INSERT INTO publications (image_url, title, summary, link, source, published) 
+            cursor.execute('''INSERT INTO publications (image_url, title, summary, link, source, published)
                               VALUES (%s, %s, %s, %s, %s, %s)''', 
                            (article['image_url'], article['title'], article['summary'], 
                             article['link'], article['source'], article['date'] or current_date_time))
@@ -82,11 +129,27 @@ def save_pub(article):
 
 
 
+def create_publications_table():
+    """Create the publications table if it doesn't exist."""
+    with closing(_connect()) as conn:
+        with closing(conn.cursor()) as cursor:
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS publications (
+                    id SERIAL PRIMARY KEY,
+                    image_url TEXT,
+                    title TEXT,
+                    summary TEXT,
+                    link TEXT UNIQUE,
+                    source TEXT,
+                    published TIMESTAMP
+                )
+            ''')
+            conn.commit()
+            logging.debug("Table 'publications' created or already exists.")
+
 def create_events_table():
     """Create the events table if it doesn't exist."""
-    with closing(psycopg2.connect(
-        dbname=DB_NAME, user=DB_USER, password=DB_PASS, host=DB_HOST, port=DB_PORT
-    )) as conn:
+    with closing(_connect()) as conn:
         with closing(conn.cursor()) as cursor:
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS events (
@@ -110,9 +173,32 @@ def create_events_table():
                     tags TEXT,
                     source TEXT,
                     month TEXT,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    event_data JSONB,
+                    detail_scrape_status TEXT,
+                    original_language TEXT,
+                    translation_status TEXT,
+                    translation_model TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
+            cursor.execute("ALTER TABLE events ADD COLUMN IF NOT EXISTS event_data JSONB")
+            cursor.execute(
+                "ALTER TABLE events ADD COLUMN IF NOT EXISTS detail_scrape_status TEXT"
+            )
+            cursor.execute(
+                "ALTER TABLE events ADD COLUMN IF NOT EXISTS original_language TEXT"
+            )
+            cursor.execute(
+                "ALTER TABLE events ADD COLUMN IF NOT EXISTS translation_status TEXT"
+            )
+            cursor.execute(
+                "ALTER TABLE events ADD COLUMN IF NOT EXISTS translation_model TEXT"
+            )
+            cursor.execute(
+                "ALTER TABLE events ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP "
+                "DEFAULT CURRENT_TIMESTAMP"
+            )
             conn.commit()
             logging.debug("Table 'events' created or already exists.")
 
@@ -128,9 +214,7 @@ def event_exists(event):
     if not event_id and not event_title and not event_url:
         return False
     
-    with closing(psycopg2.connect(
-        dbname=DB_NAME, user=DB_USER, password=DB_PASS, host=DB_HOST, port=DB_PORT
-    )) as conn:
+    with closing(_connect()) as conn:
         with closing(conn.cursor()) as cursor:
             # First check if the table exists
             cursor.execute("""
@@ -168,43 +252,86 @@ def event_exists(event):
                     
             return False
 
-def save_events_to_db(events, also_save_csv=False, filename="events.csv"):
-    """Save events to the database and optionally to a CSV file."""
-    # First, make sure the table exists
+def save_events_to_db(
+    events,
+    also_save_csv=False,
+    filename="events.csv",
+    allowed_sources=ADDITIONAL_EVENT_SOURCES,
+):
+    """Upsert event records and retain the complete enriched payload as JSONB."""
+    events = list(events)
+    if not events:
+        return 0
+    if allowed_sources is not None:
+        invalid_sources = sorted(
+            {
+                str(event.get("Source") or "<missing>")
+                for event in events
+                if event.get("Source") not in allowed_sources
+            }
+        )
+        if invalid_sources:
+            raise ValueError(
+                "Refusing to save non-additional event sources: "
+                + ", ".join(invalid_sources)
+            )
     create_events_table()
-    
-    # Save to database
-    with closing(psycopg2.connect(
-        dbname=DB_NAME, user=DB_USER, password=DB_PASS, host=DB_HOST, port=DB_PORT
-    )) as conn:
+
+    with closing(_connect()) as conn:
         with closing(conn.cursor()) as cursor:
             for event in events:
-                # Skip if event already exists - now passing the entire event
-                if event_exists(event):
-                    logging.debug(f"Duplicate event found, not saving: {event.get('Event Name')}")
-                    continue
-                
                 cursor.execute('''
                     INSERT INTO events (
                         event_name, event_id, event_url, start_date, end_date,
                         start_time, end_time, timezone, image_url, ticket_price,
                         tickets_url, venue_name, venue_address, organizer_name,
-                        organizer_url, summary, tags, source, month
+                        organizer_url, summary, tags, source, month, event_data,
+                        detail_scrape_status, original_language,
+                        translation_status, translation_model
                     ) VALUES (
-                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                        %s, %s, %s, %s, %s, %s, %s, %s,
+                        %s, %s, %s, %s, %s, %s, %s, %s,
+                        %s, %s, %s, %s, %s, %s, %s, %s
                     )
+                    ON CONFLICT (event_id) DO UPDATE SET
+                        event_name = EXCLUDED.event_name,
+                        event_url = EXCLUDED.event_url,
+                        start_date = EXCLUDED.start_date,
+                        end_date = EXCLUDED.end_date,
+                        start_time = EXCLUDED.start_time,
+                        end_time = EXCLUDED.end_time,
+                        timezone = EXCLUDED.timezone,
+                        image_url = EXCLUDED.image_url,
+                        ticket_price = EXCLUDED.ticket_price,
+                        tickets_url = EXCLUDED.tickets_url,
+                        venue_name = EXCLUDED.venue_name,
+                        venue_address = EXCLUDED.venue_address,
+                        organizer_name = EXCLUDED.organizer_name,
+                        organizer_url = EXCLUDED.organizer_url,
+                        summary = EXCLUDED.summary,
+                        tags = EXCLUDED.tags,
+                        source = EXCLUDED.source,
+                        month = EXCLUDED.month,
+                        event_data = EXCLUDED.event_data,
+                        detail_scrape_status = EXCLUDED.detail_scrape_status,
+                        original_language = EXCLUDED.original_language,
+                        translation_status = EXCLUDED.translation_status,
+                        translation_model = EXCLUDED.translation_model,
+                        updated_at = CURRENT_TIMESTAMP
                 ''', (
                     event.get('Event Name'), event.get('Event ID'), event.get('Event URL'),
                     event.get('Start Date'), event.get('End Date'), event.get('Start Time'),
                     event.get('End Time'), event.get('Timezone'), event.get('Image URL'),
                     event.get('Ticket Price'), event.get('Tickets URL'), event.get('Venue Name'),
                     event.get('Venue Address'), event.get('Organizer Name'), event.get('Organizer URL'),
-                    event.get('Summary'), event.get('Tags'), event.get('Source'), event.get('Month')
+                    event.get('Summary'), _json_text(event.get('Tags')), event.get('Source'),
+                    event.get('Month'), Json(event, dumps=_json_dumps),
+                    event.get('Detail Scrape Status'), event.get('Original Language'),
+                    event.get('Translation Status'), event.get('Translation Model')
                 ))
-                logging.debug(f"Event saved to database: {event.get('Event Name')}")
+                logging.debug(f"Event upserted in database: {event.get('Event Name')}")
             conn.commit()
-    
-    # Optionally save to CSV
+
     if also_save_csv:
         fieldnames = [
             "Event Name", "Event ID", "Event URL", "Start Date", "End Date",
@@ -214,11 +341,35 @@ def save_events_to_db(events, also_save_csv=False, filename="events.csv"):
         ]
 
         with open(filename, mode='w', newline='', encoding='utf-8') as file:
-            writer = csv.DictWriter(file, fieldnames=fieldnames)
+            writer = csv.DictWriter(file, fieldnames=fieldnames, extrasaction="ignore")
             writer.writeheader()
 
             for event in events:
                 writer.writerow(event)
+    return len(events)
+
+
+def save_additional_events_to_db(events):
+    """Persist only allowlisted additional-source events."""
+    events = list(events)
+    invalid_sources = sorted(
+        {
+            str(event.get("Source") or "<missing>")
+            for event in events
+            if event.get("Source") not in ADDITIONAL_EVENT_SOURCES
+        }
+    )
+    if invalid_sources:
+        raise ValueError(
+            "Refusing to save non-additional event sources: "
+            + ", ".join(invalid_sources)
+        )
+    missing_ids = [event.get("Event Name") for event in events if not event.get("Event ID")]
+    if missing_ids:
+        raise ValueError(
+            f"Refusing to save {len(missing_ids)} additional events without Event ID."
+        )
+    return save_events_to_db(events)
 
 # For backward compatibility
 def save_events_to_csv(events, filename="events.csv"):
@@ -227,9 +378,7 @@ def save_events_to_csv(events, filename="events.csv"):
 
 def recreate_events_table():
     """Drop and recreate the events table with the correct structure."""
-    with closing(psycopg2.connect(
-        dbname=DB_NAME, user=DB_USER, password=DB_PASS, host=DB_HOST, port=DB_PORT
-    )) as conn:
+    with closing(_connect()) as conn:
         with closing(conn.cursor()) as cursor:
             # Drop the table if it exists
             cursor.execute("DROP TABLE IF EXISTS events")
@@ -258,7 +407,13 @@ def recreate_events_table():
                     tags TEXT,
                     source TEXT,
                     month TEXT,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    event_data JSONB,
+                    detail_scrape_status TEXT,
+                    original_language TEXT,
+                    translation_status TEXT,
+                    translation_model TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
             conn.commit()
@@ -270,9 +425,7 @@ def recreate_events_table():
 
 
 def create_db():
-    with closing(psycopg2.connect(
-        dbname=DB_NAME, user=DB_USER, password=DB_PASS, host=DB_HOST, port=DB_PORT
-    )) as conn:
+    with closing(_connect()) as conn:
         with closing(conn.cursor()) as cursor:
             cursor.execute('''CREATE TABLE IF NOT EXISTS esg_articles (
                                 id SERIAL PRIMARY KEY,
@@ -281,7 +434,18 @@ def create_db():
                                 summary TEXT,
                                 link TEXT UNIQUE,
                                 source TEXT,
-                                matched_keywords TEXT
+                                matched_keywords TEXT,
+                                save_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                               )''')
             conn.commit()
             logging.debug("Table 'esg_articles' created or already exists.")
+
+def setup_all_tables():
+    """Create all tables. Run this once after pointing to a new database."""
+    create_db()
+    create_publications_table()
+    create_events_table()
+    logging.info("All tables created successfully.")
+
+if __name__ == "__main__":
+    setup_all_tables()
