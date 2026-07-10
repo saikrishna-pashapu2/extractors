@@ -1,7 +1,6 @@
 from bs4 import BeautifulSoup
 import requests
 from urllib.parse import urljoin
-from utils.db_utils import save_events_to_csv
 from datetime import datetime
 import re
 
@@ -98,3 +97,9 @@ def adb_events():
     print("Total upcoming events (ADB):", len(events_list))
     return events_list
 
+def main():
+    events = adb_events()
+    print(f"ADB events scraped without database writes: {len(events)}")
+
+if __name__ == "__main__":
+    main()
