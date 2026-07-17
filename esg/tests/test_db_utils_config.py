@@ -55,17 +55,17 @@ class DatabaseEnvironmentTests(unittest.TestCase):
 
     def test_revised_event_upsert_preserves_full_json_payload(self):
         event = {
-            "Event Name": "Climate Bonds Forum",
+            "Event Name": "Climate\x00 Bonds Forum",
             "Event ID": "cbi-1",
             "Event URL": "https://example.com/climate-bonds-forum",
-            "Tags": ["Reporting", "ESG"],
+            "Tags": ["Reporting", "ES\x00G"],
             "Source": "Climate Bonds Initiative",
             "Detail Scrape Status": "ok",
             "Original Language": "fr",
             "Translation Status": "translated",
             "Translation Model": "gpt-4o-mini",
             "Agenda": "Opening session",
-            "Additional Details": {"Audience": "Reporters"},
+            "Additional Details": {"Audience": "Report\x00ers"},
         }
         connection = Mock()
         cursor = Mock()
@@ -80,8 +80,14 @@ class DatabaseEnvironmentTests(unittest.TestCase):
         sql, values = cursor.execute.call_args.args
         self.assertIn("ON CONFLICT (event_id) DO UPDATE", sql)
         self.assertEqual(len(values), 24)
+        self.assertEqual(values[0], "Climate Bonds Forum")
         self.assertEqual(values[16], '["Reporting", "ESG"]')
         self.assertIsInstance(values[19], db_utils.Json)
+        self.assertEqual(
+            values[19].adapted["Additional Details"]["Audience"],
+            "Reporters",
+        )
+        self.assertNotIn("\x00", db_utils._json_dumps(values[19].adapted))
         self.assertEqual(values[20:24], ("ok", "fr", "translated", "gpt-4o-mini"))
         connection.commit.assert_called_once()
 

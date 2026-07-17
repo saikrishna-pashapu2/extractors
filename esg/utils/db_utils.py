@@ -58,6 +58,22 @@ def _json_dumps(value):
     )
 
 
+def _sanitize_postgres_value(value):
+    """Remove NUL characters, which PostgreSQL cannot store in text or JSONB."""
+    if isinstance(value, str):
+        return value.replace("\x00", "")
+    if isinstance(value, dict):
+        return {
+            _sanitize_postgres_value(key): _sanitize_postgres_value(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_sanitize_postgres_value(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_sanitize_postgres_value(item) for item in value)
+    return value
+
+
 def _json_text(value):
     if value in (None, ""):
         return None
@@ -273,7 +289,9 @@ def save_events_to_db(
 
     with closing(_connect()) as conn:
         with closing(conn.cursor()) as cursor:
-            for event in events:
+            saved_event_names = []
+            for raw_event in events:
+                event = _sanitize_postgres_value(raw_event)
                 cursor.execute('''
                     INSERT INTO events (
                         event_name, event_id, event_url, start_date, end_date,
@@ -323,8 +341,10 @@ def save_events_to_db(
                     event.get('Detail Scrape Status'), event.get('Original Language'),
                     event.get('Translation Status'), event.get('Translation Model')
                 ))
-                logging.debug(f"Event upserted in database: {event.get('Event Name')}")
+                saved_event_names.append(event.get("Event Name"))
             conn.commit()
+            for event_name in saved_event_names:
+                logging.debug(f"Event upserted in database: {event_name}")
 
     if also_save_csv:
         fieldnames = [
