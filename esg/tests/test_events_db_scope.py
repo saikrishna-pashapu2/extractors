@@ -22,9 +22,14 @@ class EventDatabaseScopeTests(unittest.TestCase):
                 "Source": "Climate Bonds Initiative",
             }
         ]
+
+        def scrape_sources(on_source_events):
+            on_source_events("climate_bonds_initiative", revised_events)
+            return revised_events
+
         with patch(
             "events.events.scrape_all_revised_events",
-            return_value=revised_events,
+            side_effect=scrape_sources,
         ) as scrape, patch(
             "events.events.save_revised_events_to_db",
             return_value=1,
@@ -32,7 +37,7 @@ class EventDatabaseScopeTests(unittest.TestCase):
             result = event_pipeline.all_events()
 
         self.assertEqual(result, revised_events)
-        scrape.assert_called_once_with()
+        scrape.assert_called_once()
         save.assert_called_once_with(revised_events)
 
 

@@ -252,6 +252,37 @@ class RevisedSourcePipelineTests(unittest.TestCase):
             ],
         )
 
+    @patch("events.revised_sources.scrape_revised_source")
+    def test_combined_run_emits_each_source_for_incremental_save(
+        self,
+        source_scraper,
+    ):
+        source_scraper.side_effect = [
+            [{**self.listing_events[0], "Source": "AIIB"}],
+            [{**self.listing_events[1], "Source": "CDP"}],
+        ]
+        save_source = Mock()
+
+        result = scrape_all_revised_events(
+            source_keys=["aiib", "cdp"],
+            on_source_events=save_source,
+        )
+
+        self.assertEqual(len(result), 2)
+        self.assertEqual(
+            save_source.call_args_list,
+            [
+                call(
+                    "aiib",
+                    [{**self.listing_events[0], "Source": "AIIB"}],
+                ),
+                call(
+                    "cdp",
+                    [{**self.listing_events[1], "Source": "CDP"}],
+                ),
+            ],
+        )
+
     def test_extra_listing_page_is_not_scraped_as_an_event_detail(self):
         source = SOURCE_CONFIGS["emirates_gbc"]
         config = _event_page_config(

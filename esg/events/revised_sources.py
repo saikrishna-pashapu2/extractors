@@ -6,7 +6,7 @@ import sys
 from dataclasses import dataclass
 from datetime import date, datetime, time
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 from urllib.parse import urlparse, urlunparse
 
 import requests
@@ -751,6 +751,9 @@ def scrape_all_revised_events(
     include_details: bool = True,
     include_translation: bool = True,
     continue_on_error: bool = True,
+    on_source_events: Optional[
+        Callable[[str, List[Dict[str, Any]]], None]
+    ] = None,
 ) -> List[Dict[str, Any]]:
     """Scrape revised workbook sources without database writes."""
     if session is None:
@@ -761,6 +764,7 @@ def scrape_all_revised_events(
                 include_details=include_details,
                 include_translation=include_translation,
                 continue_on_error=continue_on_error,
+                on_source_events=on_source_events,
             )
 
     keys = list(source_keys or SOURCE_CONFIGS)
@@ -777,12 +781,16 @@ def scrape_all_revised_events(
                 continue_on_error=continue_on_error,
             )
             print(f"Total revised events ({source_key}): {len(source_events)}")
-            events.extend(source_events)
+            merged_events = _dedupe_merged_events([*events, *source_events])
+            new_events = merged_events[len(events) :]
+            if on_source_events and new_events:
+                on_source_events(source_key, new_events)
+            events = merged_events
         except Exception as exc:
             if not continue_on_error:
                 raise
-            print(f"Failed to scrape revised source {source_key}: {exc}")
-    return _dedupe_merged_events(events)
+            print(f"Failed to process revised source {source_key}: {exc}")
+    return events
 
 
 def _filter_events(
