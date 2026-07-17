@@ -109,6 +109,7 @@ class EventPageConfig:
     deny_title_patterns: Tuple[str, ...] = DEFAULT_DENY_TITLE_PATTERNS
     request_headers: Dict[str, str] = field(default_factory=dict)
     max_events: int = 100
+    listing_urls: Tuple[str, ...] = ()
 
 
 def scrape_event_page(
@@ -169,7 +170,10 @@ def enrich_event_details(
         for index, event in enumerate(events, start=1):
             normalized = _with_detail_defaults(event)
             event_url = _normalize_url(event.get("Event URL"))
-            if not event_url or _same_url(event_url, config.url):
+            listing_urls = (config.url, *config.listing_urls)
+            if not event_url or any(
+                _same_url(event_url, listing_url) for listing_url in listing_urls
+            ):
                 normalized["Detail Scrape Status"] = "skipped_no_detail_url"
                 normalized["Detail Scrape Error"] = (
                     "The listing did not provide a separate event detail URL."

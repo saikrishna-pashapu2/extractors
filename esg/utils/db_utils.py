@@ -10,6 +10,8 @@ import psycopg2
 from psycopg2.extras import Json
 from dotenv import load_dotenv
 
+from events.revised_sources import SOURCE_CONFIGS as REVISED_SOURCE_CONFIGS
+
 
 load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 
@@ -21,16 +23,8 @@ DB_PORT = os.getenv("DB_PORT", "5432")
 
 logging.basicConfig(level=logging.DEBUG)
 
-ADDITIONAL_EVENT_SOURCES = frozenset(
-    {
-        "Global Reporting Initiative (GRI)",
-        "Sustainable Fitch",
-        "S&P Global",
-        "Central Bank of the UAE (CBUAE)",
-        "Climate Bonds Initiative",
-        "OECD",
-        "World Economic Forum",
-    }
+REVISED_EVENT_SOURCES = frozenset(
+    config.source for config in REVISED_SOURCE_CONFIGS.values()
 )
 
 
@@ -256,7 +250,7 @@ def save_events_to_db(
     events,
     also_save_csv=False,
     filename="events.csv",
-    allowed_sources=ADDITIONAL_EVENT_SOURCES,
+    allowed_sources=REVISED_EVENT_SOURCES,
 ):
     """Upsert event records and retain the complete enriched payload as JSONB."""
     events = list(events)
@@ -272,7 +266,7 @@ def save_events_to_db(
         )
         if invalid_sources:
             raise ValueError(
-                "Refusing to save non-additional event sources: "
+                "Refusing to save non-revised event sources: "
                 + ", ".join(invalid_sources)
             )
     create_events_table()
@@ -349,25 +343,25 @@ def save_events_to_db(
     return len(events)
 
 
-def save_additional_events_to_db(events):
-    """Persist only allowlisted additional-source events."""
+def save_revised_events_to_db(events):
+    """Persist only allowlisted sources from the revised event workbook."""
     events = list(events)
     invalid_sources = sorted(
         {
             str(event.get("Source") or "<missing>")
             for event in events
-            if event.get("Source") not in ADDITIONAL_EVENT_SOURCES
+            if event.get("Source") not in REVISED_EVENT_SOURCES
         }
     )
     if invalid_sources:
         raise ValueError(
-            "Refusing to save non-additional event sources: "
+            "Refusing to save non-revised event sources: "
             + ", ".join(invalid_sources)
         )
     missing_ids = [event.get("Event Name") for event in events if not event.get("Event ID")]
     if missing_ids:
         raise ValueError(
-            f"Refusing to save {len(missing_ids)} additional events without Event ID."
+            f"Refusing to save {len(missing_ids)} revised events without Event ID."
         )
     return save_events_to_db(events)
 
