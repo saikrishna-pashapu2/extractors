@@ -1,14 +1,19 @@
 import hashlib
+import html
 import re
 from datetime import date, datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 import requests
 from bs4 import BeautifulSoup
 from dateutil import parser as date_parser
 
-from events.event_page_scraper import EventPageConfig, enrich_event_details
+from events.event_page_scraper import (
+    EventPageConfig,
+    enrich_event_details,
+    scrape_event_page,
+)
 from events.event_translator import translate_events_to_english
 
 
@@ -23,9 +28,14 @@ DEFAULT_HEADERS = {
 }
 
 GRI_EVENTS_URL = "https://www.globalreporting.org/news/events/"
+GGGI_EVENTS_URL = "https://gggi.org/events/list/"
 SUSTAINABLE_FITCH_EVENTS_URL = "https://www.sustainablefitch.com/events"
 SUSTAINABLE_FITCH_DATA_URL = (
     "https://www.sustainablefitch.com/page-data/events/page-data.json"
+)
+FITCH_RATINGS_EVENTS_URL = "https://www.fitchratings.com/events"
+FITCH_RATINGS_DATA_URL = (
+    "https://www.fitchratings.com/page-data/events/page-data.json"
 )
 SP_GLOBAL_EVENTS_URL = (
     "https://www.spglobal.com/en/research-insights/events/featured"
@@ -124,17 +134,124 @@ def _gri_listing_events(
     return _dedupe(events)
 
 
+def _gggi_listing_events(
+    session: Optional[requests.Session] = None,
+) -> List[Dict[str, Any]]:
+    """Keep only real GGGI event cards and deduplicate them by detail URL."""
+    candidates = scrape_event_page(
+        ADDITIONAL_SOURCE_CONFIGS["gggi"],
+        session=session,
+    )
+    events_by_url: Dict[str, Dict[str, Any]] = {}
+    for candidate in candidates:
+        event_url = _clean_text(candidate.get("Event URL"))
+        if not _is_gggi_event_detail_url(event_url):
+            continue
+
+        event = dict(candidate)
+        event["Event Name"] = _decode_gggi_text(event.get("Event Name"))
+        event["Summary"] = _decode_gggi_text(event.get("Summary"))
+        event["Source"] = "Global Green Growth Institute (GGGI)"
+        existing = events_by_url.get(event_url)
+        if existing is None or _gggi_event_quality(event) > _gggi_event_quality(
+            existing
+        ):
+            events_by_url[event_url] = event
+    return list(events_by_url.values())
+
+
+def _is_gggi_event_detail_url(value: Optional[str]) -> bool:
+    if not value:
+        return False
+    parsed = urlparse(value)
+    host = parsed.netloc.lower()
+    path = parsed.path.rstrip("/") + "/"
+    return (
+        host in {"gggi.org", "www.gggi.org"} and path.startswith("/event/")
+    ) or host == "globalgreengrowthweek.gggi.org"
+
+
+def _decode_gggi_text(value: Any) -> Optional[str]:
+    text = _clean_text(value)
+    if not text:
+        return None
+    text = text.replace("\\n", " ")
+    for _ in range(2):
+        decoded = html.unescape(text)
+        if decoded == text:
+            break
+        text = decoded
+    return _clean_text(BeautifulSoup(text, "html.parser").get_text(" ", strip=True))
+
+
+def _gggi_event_quality(event: Dict[str, Any]) -> int:
+    title = str(event.get("Event Name") or "")
+    return sum(
+        (
+            4 if event.get("Start Date") else 0,
+            3 if event.get("End Date") else 0,
+            2 if event.get("Summary") else 0,
+            1 if event.get("Venue Name") or event.get("Venue Address") else 0,
+            -5 if "\ufffd" in title else 0,
+        )
+    )
+
+
+def normalize_gggi_events(
+    events: Sequence[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Decode GGGI display fields while retaining raw structured data."""
+    normalized_events = []
+    for event in events:
+        normalized = dict(event)
+        for field in ("Event Name", "Summary", "Detail Page Title", "Detail Text"):
+            if normalized.get(field):
+                normalized[field] = _decode_gggi_text(normalized[field])
+        normalized_events.append(normalized)
+    return normalized_events
+
+
 def _sustainable_fitch_listing_events(
     session: Optional[requests.Session] = None,
 ) -> List[Dict[str, Any]]:
     """Scrape Sustainable Fitch's published Gatsby event data."""
+    return _fitch_contentful_listing_events(
+        source_key="sustainable_fitch",
+        source="Sustainable Fitch",
+        events_url=SUSTAINABLE_FITCH_EVENTS_URL,
+        data_url=SUSTAINABLE_FITCH_DATA_URL,
+        session=session,
+    )
+
+
+def _fitch_ratings_listing_events(
+    session: Optional[requests.Session] = None,
+) -> List[Dict[str, Any]]:
+    """Scrape Fitch Ratings' published Gatsby event data."""
+    return _fitch_contentful_listing_events(
+        source_key="fitch_ratings",
+        source="Fitch Ratings",
+        events_url=FITCH_RATINGS_EVENTS_URL,
+        data_url=FITCH_RATINGS_DATA_URL,
+        session=session,
+    )
+
+
+def _fitch_contentful_listing_events(
+    source_key: str,
+    source: str,
+    events_url: str,
+    data_url: str,
+    session: Optional[requests.Session] = None,
+) -> List[Dict[str, Any]]:
+    """Normalize upcoming events from a Fitch Contentful/Gatsby feed."""
     client = session or requests.Session()
     response = client.get(
-        SUSTAINABLE_FITCH_DATA_URL,
+        data_url,
         headers=DEFAULT_HEADERS,
         timeout=30,
     )
-    print(f"Response status code (Sustainable Fitch): {response.status_code}")
+    print(f"Response status code ({source}): {response.status_code}")
     response.raise_for_status()
 
     nodes = (
@@ -144,17 +261,22 @@ def _sustainable_fitch_listing_events(
         .get("allContentfulEvent", {})
         .get("nodes", [])
     )
+    if not isinstance(nodes, list):
+        raise ValueError(f"{source} event feed did not contain an event list")
+
     today = datetime.now(timezone.utc).date()
     events = []
     for node in nodes:
+        if not isinstance(node, dict):
+            continue
         title = _clean_text(node.get("title"))
-        start = _parse_datetime(node.get("startDate"))
-        end = _parse_datetime(node.get("endDate"))
+        start = _parse_datetime(node.get("isoStartTime") or node.get("startDate"))
+        end = _parse_datetime(node.get("isoEndTime") or node.get("endDate"))
         last_event_date = (end or start).date() if (end or start) else None
         if not title or not start or not last_event_date or last_event_date < today:
             continue
 
-        event_url = _absolute_url(node.get("vanityUrl"), SUSTAINABLE_FITCH_EVENTS_URL)
+        event_url = _absolute_url(node.get("vanityUrl"), events_url)
         location_parts = _location_parts(
             [
                 node.get("locationAddress"),
@@ -162,36 +284,79 @@ def _sustainable_fitch_listing_events(
                 node.get("locationCountry"),
             ]
         )
-        image_url = (
-            node.get("image", {}).get("fixed", {}).get("src")
-            if isinstance(node.get("image"), dict)
-            else None
-        )
+        image_url = _fitch_image_url(node.get("image"))
+        countries = _titles(node.get("countries"))
+        regions = _titles(node.get("regions"))
+        sectors = _titles(node.get("sectors"))
+        topics = _slugs(node.get("topics"))
+        languages = _slugs(node.get("languages"))
         tags = _unique_strings(
             [node.get("eventType")]
-            + _titles(node.get("sectors"))
-            + _titles(node.get("regions"))
-            + _slugs(node.get("topics"))
+            + sectors
+            + regions
+            + countries
+            + topics
         )
-        events.append(
-            _event(
-                source_key="sustainable_fitch",
-                source="Sustainable Fitch",
-                title=title,
-                event_url=event_url,
-                event_id=node.get("eventId"),
-                start_date=start.date(),
-                end_date=end.date() if end else None,
-                start_time=_time_or_none(start),
-                end_time=_time_or_none(end),
-                timezone_name=node.get("timeZone"),
-                image_url=image_url,
-                venue_name=_clean_text(node.get("locationName")),
-                venue_address=", ".join(location_parts) or None,
-                tags=tags,
-            )
+        event = _event(
+            source_key=source_key,
+            source=source,
+            title=title,
+            event_url=event_url,
+            event_id=node.get("eventId"),
+            start_date=start.date(),
+            end_date=end.date() if end else None,
+            start_time=_time_or_none(start),
+            end_time=_time_or_none(end),
+            timezone_name=node.get("timeZone"),
+            image_url=image_url,
+            venue_name=_clean_text(node.get("locationName")),
+            venue_address=", ".join(location_parts) or None,
+            organizer_name=source,
+            tags=tags,
         )
+        event.update(
+            {
+                "Fitch Event ID": node.get("eventId"),
+                "Event Type": _clean_text(node.get("eventType")),
+                "Countries": countries,
+                "Regions": regions,
+                "Sectors": sectors,
+                "Topics": topics,
+                "Languages": languages,
+                "Listing ISO Start": node.get("isoStartTime")
+                or node.get("startDate"),
+                "Listing ISO End": node.get("isoEndTime") or node.get("endDate"),
+                "Time Zone Abbreviation": _clean_text(
+                    node.get("timeZoneAbbreviation")
+                ),
+                "Relative Event URL": _clean_text(node.get("relativeVanityUrl")),
+                "Image Title": _clean_text(
+                    node.get("image", {}).get("title")
+                    if isinstance(node.get("image"), dict)
+                    else None
+                ),
+            }
+        )
+        events.append(event)
     return _dedupe(events)
+
+
+def _fitch_image_url(image: Any) -> Optional[str]:
+    if not isinstance(image, dict):
+        return None
+    fixed = image.get("fixed")
+    if isinstance(fixed, dict) and fixed.get("src"):
+        return _clean_text(fixed.get("src"))
+    gatsby_data = image.get("gatsbyImageData")
+    if not isinstance(gatsby_data, dict):
+        return None
+    images = gatsby_data.get("images")
+    if not isinstance(images, dict):
+        return None
+    fallback = images.get("fallback")
+    if isinstance(fallback, dict):
+        return _clean_text(fallback.get("src"))
+    return None
 
 
 def _sp_global_listing_events(
@@ -775,11 +940,30 @@ ADDITIONAL_SOURCE_CONFIGS = {
         category="ESG disclosure / standards",
         url=GRI_EVENTS_URL,
     ),
+    "gggi": EventPageConfig(
+        key="gggi",
+        source="Global Green Growth Institute (GGGI)",
+        category="Intergovernmental organization",
+        url=GGGI_EVENTS_URL,
+        allowed_domains=("gggi.org",),
+        allow_url_patterns=(
+            r"^https://(?:www\.)?gggi\.org/event/",
+            r"^https://globalgreengrowthweek\.gggi\.org/",
+        ),
+    ),
     "sustainable_fitch": EventPageConfig(
         key="sustainable_fitch",
         source="Sustainable Fitch",
         category="ESG ratings / research",
         url=SUSTAINABLE_FITCH_EVENTS_URL,
+        allowed_domains=("sustainablefitch.com", "fitchratings.com"),
+    ),
+    "fitch_ratings": EventPageConfig(
+        key="fitch_ratings",
+        source="Fitch Ratings",
+        category="Credit ratings / research",
+        url=FITCH_RATINGS_EVENTS_URL,
+        allowed_domains=("fitchratings.com",),
     ),
     "sp_global": EventPageConfig(
         key="sp_global",
@@ -815,7 +999,9 @@ ADDITIONAL_SOURCE_CONFIGS = {
 
 _ADDITIONAL_LISTING_SCRAPERS = {
     "gri": _gri_listing_events,
+    "gggi": _gggi_listing_events,
     "sustainable_fitch": _sustainable_fitch_listing_events,
+    "fitch_ratings": _fitch_ratings_listing_events,
     "sp_global": _sp_global_listing_events,
     "cbuae": _cbuae_listing_events,
     "climate_bonds_initiative": _climate_bonds_listing_events,
@@ -850,6 +1036,8 @@ def scrape_additional_source(
             session=session,
             continue_on_error=continue_on_error,
         )
+    if source_key == "gggi":
+        events = normalize_gggi_events(events)
     if include_translation:
         events = translate_events_to_english(
             events,
@@ -874,6 +1062,21 @@ def gri_events(
     )
 
 
+def gggi_events(
+    session: Optional[requests.Session] = None,
+    include_details: bool = True,
+    include_translation: bool = True,
+    continue_on_error: bool = True,
+) -> List[Dict[str, Any]]:
+    return scrape_additional_source(
+        "gggi",
+        session=session,
+        include_details=include_details,
+        include_translation=include_translation,
+        continue_on_error=continue_on_error,
+    )
+
+
 def sustainable_fitch_events(
     session: Optional[requests.Session] = None,
     include_details: bool = True,
@@ -882,6 +1085,21 @@ def sustainable_fitch_events(
 ) -> List[Dict[str, Any]]:
     return scrape_additional_source(
         "sustainable_fitch",
+        session=session,
+        include_details=include_details,
+        include_translation=include_translation,
+        continue_on_error=continue_on_error,
+    )
+
+
+def fitch_ratings_events(
+    session: Optional[requests.Session] = None,
+    include_details: bool = True,
+    include_translation: bool = True,
+    continue_on_error: bool = True,
+) -> List[Dict[str, Any]]:
+    return scrape_additional_source(
+        "fitch_ratings",
         session=session,
         include_details=include_details,
         include_translation=include_translation,
@@ -974,7 +1192,7 @@ def all_additional_source_events(
     include_translation: bool = True,
     continue_on_error: bool = True,
 ) -> List[Dict[str, Any]]:
-    """Scrape only the seven additional sources for the event DB pipeline."""
+    """Scrape the registered additional sources for the event DB pipeline."""
     if session is None:
         with requests.Session() as client:
             return all_additional_source_events(
@@ -1013,8 +1231,11 @@ __all__ = [
     "all_additional_source_events",
     "cbuae_events",
     "climate_bonds_events",
+    "fitch_ratings_events",
+    "gggi_events",
     "gri_events",
     "oecd_events",
+    "normalize_gggi_events",
     "sp_global_events",
     "sustainable_fitch_events",
     "scrape_additional_source",

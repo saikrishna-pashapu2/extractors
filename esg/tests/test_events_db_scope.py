@@ -7,12 +7,12 @@ from utils.db_utils import REVISED_EVENT_SOURCES
 
 
 class EventDatabaseScopeTests(unittest.TestCase):
-    def test_allowlist_contains_exactly_the_71_revised_sources(self):
+    def test_allowlist_contains_all_production_event_sources(self):
         self.assertEqual(
             REVISED_EVENT_SOURCES,
             {config.source for config in SOURCE_CONFIGS.values()},
         )
-        self.assertEqual(len(REVISED_EVENT_SOURCES), 71)
+        self.assertEqual(len(REVISED_EVENT_SOURCES), 73)
 
     def test_all_events_scrapes_and_saves_revised_sources(self):
         revised_events = [

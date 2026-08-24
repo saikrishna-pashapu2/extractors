@@ -14,7 +14,11 @@ import requests
 from events.additional_sources import (
     cbuae_events,
     climate_bonds_events,
+    fitch_ratings_events,
+    gggi_events,
+    normalize_gggi_events,
     oecd_events,
+    sustainable_fitch_events,
     wef_events,
 )
 from events.event_page_scraper import (
@@ -256,6 +260,13 @@ REVISED_EVENT_SOURCES = (
         comment="Use the revised climate policy page.",
     ),
     _source(
+        "fitch_ratings",
+        "Fitch Ratings",
+        _page("https://www.fitchratings.com/events"),
+        comment="Use the public Fitch Contentful event feed.",
+        allowed_domains=("fitchratings.com",),
+    ),
+    _source(
         "fao",
         "Food and Agriculture Organization (FAO)",
         _page("https://www.fao.org/climate-change/events/en"),
@@ -406,6 +417,13 @@ REVISED_EVENT_SOURCES = (
         "Sustainable Stock Exchanges Initiative (SSE)",
         _page("https://sseinitiative.org/sse-events"),
         comment="Use the corrected SSE events link.",
+    ),
+    _source(
+        "sustainable_fitch",
+        "Sustainable Fitch",
+        _page("https://www.sustainablefitch.com/events"),
+        comment="Use the public Sustainable Fitch Contentful event feed.",
+        allowed_domains=("sustainablefitch.com", "fitchratings.com"),
     ),
     _source(
         "tnfd",
@@ -622,7 +640,10 @@ SOURCE_CONFIGS: Dict[str, RevisedSourceConfig] = {
 _ADDITIONAL_LISTING_OVERRIDES = {
     "cbuae": cbuae_events,
     "climate_bonds_initiative": climate_bonds_events,
+    "fitch_ratings": fitch_ratings_events,
+    "gggi": gggi_events,
     "oecd": oecd_events,
+    "sustainable_fitch": sustainable_fitch_events,
     "wef": wef_events,
 }
 
@@ -736,6 +757,8 @@ def scrape_revised_source(
             session=session,
             continue_on_error=continue_on_error,
         )
+    if source_key == "gggi":
+        selected = normalize_gggi_events(selected)
     if include_translation:
         selected = translate_events_to_english(
             selected,

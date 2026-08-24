@@ -981,6 +981,8 @@ def _fetch_detail_content(
         response.raise_for_status()
         if not response.text.strip():
             raise ValueError("Reader returned an empty response")
+        if _looks_like_block_page(response.text):
+            raise ValueError("Reader returned an access-denied page")
         return "markdown_reader", response.text
     except (requests.RequestException, ValueError) as exc:
         raise RuntimeError(
@@ -997,6 +999,8 @@ def _looks_like_block_page(value: str) -> bool:
         "enable javascript and cookies to continue",
         "captcha challenge",
         "access denied",
+        "you don't have permission to access",
+        "errors.edgesuite.net",
     )
     return any(indicator in sample for indicator in indicators)
 
@@ -1360,7 +1364,34 @@ def _merge_detail_sources(
             )
         elif not merged.get(key):
             merged[key] = value
+
+    detail_text = merged.get("Detail Text")
+    if detail_text and _looks_like_template_text(str(detail_text)):
+        summary_text = _html_fragment_text(
+            primary.get("Summary") or fallback.get("Summary")
+        )
+        if summary_text:
+            merged["Detail Text"] = summary_text
     return merged
+
+
+def _looks_like_template_text(value: str) -> bool:
+    normalized = value.lower()
+    markers = (
+        "text goes here",
+        "speaker bio template",
+        "partner modal template",
+        "agenda bio modal template",
+    )
+    return sum(marker in normalized for marker in markers) >= 2
+
+
+def _html_fragment_text(value: Any) -> Optional[str]:
+    if value in (None, ""):
+        return None
+    return _clean_text(
+        BeautifulSoup(str(value), "html.parser").get_text(" ", strip=True)
+    )
 
 
 def _parse_detail_locations(

@@ -16,14 +16,24 @@ from events.revised_sources import (
 
 
 class RevisedSourceRegistryTests(unittest.TestCase):
-    def test_registry_contains_all_71_workbook_sources(self):
-        self.assertEqual(len(REVISED_EVENT_SOURCES), 71)
-        self.assertEqual(len(SOURCE_CONFIGS), 71)
+    def test_registry_contains_workbook_and_new_fitch_sources(self):
+        self.assertEqual(len(REVISED_EVENT_SOURCES), 73)
+        self.assertEqual(len(SOURCE_CONFIGS), 73)
         self.assertIn("adb", SOURCE_CONFIGS)
+        self.assertIn("fitch_ratings", SOURCE_CONFIGS)
+        self.assertIn("sustainable_fitch", SOURCE_CONFIGS)
         self.assertIn("wecoop", SOURCE_CONFIGS)
         self.assertEqual(
             SOURCE_CONFIGS["net_zero_tracker"].url,
             "https://zerotracker.net/insights",
+        )
+        self.assertEqual(
+            SOURCE_CONFIGS["fitch_ratings"].url,
+            "https://www.fitchratings.com/events",
+        )
+        self.assertEqual(
+            SOURCE_CONFIGS["sustainable_fitch"].url,
+            "https://www.sustainablefitch.com/events",
         )
 
     def test_extra_urls_from_comments_are_registered(self):
