@@ -196,6 +196,65 @@ City Conference Centre is next to the metro station.
         self.assertEqual(event["Detail Page Format"], "markdown_reader")
         self.assertEqual(len(session.urls), 2)
 
+    def test_reader_fallback_rejects_access_denied_content(self):
+        denied = """Title: Access Denied
+URL Source: https://example.com/events/climate-forum
+Markdown Content:
+You don't have permission to access this page on this server.
+Reference #18.example https://errors.edgesuite.net/18.example
+"""
+        session = FakeSession(
+            [
+                FakeResponse("Access denied", status_code=403),
+                FakeResponse(denied, content_type="text/plain"),
+            ]
+        )
+        listing_event = {
+            **self.listing_event,
+            "Summary": "Valid summary supplied by the event listing.",
+        }
+
+        event = enrich_event_details(
+            [listing_event],
+            self.config,
+            session=session,
+        )[0]
+
+        self.assertEqual(event["Detail Scrape Status"], "failed")
+        self.assertIn("access-denied page", event["Detail Scrape Error"])
+        self.assertEqual(event["Summary"], listing_event["Summary"])
+        self.assertIsNone(event["Detail Text"])
+        self.assertEqual(len(session.urls), 2)
+
+    def test_replaces_template_text_with_structured_description(self):
+        structured_event = {
+            "@context": "https://schema.org",
+            "@type": "Event",
+            "name": "Transition Finance Forum",
+            "description": "<p>The real event description.</p>",
+        }
+        html = f"""
+        <html><head>
+          <script type="application/ld+json">{json.dumps(structured_event)}</script>
+        </head><body><main>
+          <h1>Transition Finance Forum</h1>
+          <p>The real event description.</p>
+          <div>Text goes here</div>
+          <div>Speaker Bio Template</div>
+          <div>Partner Modal Template</div>
+        </main></body></html>
+        """
+        session = FakeSession([FakeResponse(html)])
+
+        event = enrich_event_details(
+            [self.listing_event],
+            self.config,
+            session=session,
+        )[0]
+
+        self.assertEqual(event["Detail Text"], "The real event description.")
+        self.assertNotIn("Template", event["Detail Text"])
+
     def test_marks_listing_url_when_no_separate_detail_page_exists(self):
         event = {
             **self.listing_event,

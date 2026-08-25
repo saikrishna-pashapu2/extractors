@@ -38,7 +38,7 @@ class DatabaseEnvironmentTests(unittest.TestCase):
 
         connect.assert_not_called()
 
-    def test_event_saver_rejects_non_additional_sources_before_connecting(self):
+    def test_event_saver_rejects_non_revised_sources_before_connecting(self):
         event = {
             "Event Name": "ADB Event",
             "Event ID": "adb-1",
@@ -47,25 +47,25 @@ class DatabaseEnvironmentTests(unittest.TestCase):
         with patch("utils.db_utils.create_events_table") as create_table, patch(
             "utils.db_utils._connect"
         ) as connect:
-            with self.assertRaisesRegex(ValueError, "non-additional event sources: ADB"):
+            with self.assertRaisesRegex(ValueError, "non-revised event sources: ADB"):
                 db_utils.save_events_to_db([event])
 
         create_table.assert_not_called()
         connect.assert_not_called()
 
-    def test_additional_event_upsert_preserves_full_json_payload(self):
+    def test_revised_event_upsert_preserves_full_json_payload(self):
         event = {
-            "Event Name": "GRI Forum",
-            "Event ID": "gri-1",
-            "Event URL": "https://example.com/gri-forum",
-            "Tags": ["Reporting", "ESG"],
-            "Source": "Global Reporting Initiative (GRI)",
+            "Event Name": "Climate\x00 Bonds Forum",
+            "Event ID": "cbi-1",
+            "Event URL": "https://example.com/climate-bonds-forum",
+            "Tags": ["Reporting", "ES\x00G"],
+            "Source": "Climate Bonds Initiative",
             "Detail Scrape Status": "ok",
             "Original Language": "fr",
             "Translation Status": "translated",
             "Translation Model": "gpt-4o-mini",
             "Agenda": "Opening session",
-            "Additional Details": {"Audience": "Reporters"},
+            "Additional Details": {"Audience": "Report\x00ers"},
         }
         connection = Mock()
         cursor = Mock()
@@ -74,14 +74,20 @@ class DatabaseEnvironmentTests(unittest.TestCase):
             "utils.db_utils._connect",
             return_value=connection,
         ):
-            saved = db_utils.save_additional_events_to_db([event])
+            saved = db_utils.save_revised_events_to_db([event])
 
         self.assertEqual(saved, 1)
         sql, values = cursor.execute.call_args.args
         self.assertIn("ON CONFLICT (event_id) DO UPDATE", sql)
         self.assertEqual(len(values), 24)
+        self.assertEqual(values[0], "Climate Bonds Forum")
         self.assertEqual(values[16], '["Reporting", "ESG"]')
         self.assertIsInstance(values[19], db_utils.Json)
+        self.assertEqual(
+            values[19].adapted["Additional Details"]["Audience"],
+            "Reporters",
+        )
+        self.assertNotIn("\x00", db_utils._json_dumps(values[19].adapted))
         self.assertEqual(values[20:24], ("ok", "fr", "translated", "gpt-4o-mini"))
         connection.commit.assert_called_once()
 
